@@ -37,7 +37,7 @@ jobs:
         os: ["6.4.0", "6.4.1", "6.4.2"]
     runs-on: ubuntu-24.04
     env:
-      SEC_VBOX : ${{ secrets.SEC_VBOX }}
+      SEC_VBOX : ${{ vars.SEC_VBOX }}
     steps:
 #    - name: Free Disk Space (Ubuntu)
 #      uses: jlumbroso/free-disk-space@main
@@ -47,7 +47,7 @@ jobs:
 #        tool-cache: false
     - uses: actions/checkout@v4
     - name: Creating Web console
-      uses: vmactions/cf-tunnel@v0
+      uses: anyvm-org/cf-tunnel@v0
       id: tunnel
       with:
         protocol: http
@@ -65,5 +65,6 @@ jobs:
           dragonflybsd-${{ matrix.os }}.qcow2.zst*
           dragonflybsd-${{ matrix.os }}-id_rsa.pub
           dragonflybsd-${{ matrix.os }}-host.id_rsa
+          dragonflybsd-${{ matrix.os }}.xml
 
 
