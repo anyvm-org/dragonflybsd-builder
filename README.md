@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/anyvm-org/dragonflybsd-builder/actions/workflows/build.yml/badge.svg)](https://github.com/anyvm-org/dragonflybsd-builder/actions/workflows/build.yml)
 
-Latest: v0.9.9
+Latest: v1.0.0
 
 
 The image builder for `dragonflybsd`
