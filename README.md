@@ -8,6 +8,22 @@ Latest: v2.0.4
 The image builder for `dragonflybsd`
 
 
+All the supported releases are here:
+
+
+
+| Release | x86_64(amd64)  | aarch64(arm64) |
+|---------|---------|---------|
+| 6.4.0   |  ✅     | ❌   |
+| 6.4.1   |  ✅     | ❌   |
+| 6.4.2   |  ✅     | ❌   |
+
+
+
+
+
+
+
 How to use:
 
 1. Use the [manual.yml](.github/workflows/manual.yml) to build manually.
