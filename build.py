@@ -767,25 +767,42 @@ def build_qemu_args(media_kind=None, media_path=None):
         if accel == "kvm":
             a += ["-global", "kvm-pit.lost_tick_policy=delay"]
         a += ["-device", "%s,netdev=net0" % nic, "-device", "virtio-balloon-pci"]
-        # Pin the install CDROM (when present) to IDE primary master,
-        # matching the libvirt-era release XML (`<target dev='hda' bus='ide'/>`).
-        # That makes the guest see it as cd0a -- NetBSD sysinst's default
-        # mount path. QEMU's `-cdrom` shortcut puts it at IDE index=2
-        # (secondary master = cd1a), which NetBSD then fails to mount and
-        # falls into the "Distribution medium" menu loop.
-        # When the main disk is also on IDE (dragonflybsd / ghostbsd:
-        # VM_DISK=ide), shift it to secondary master to avoid colliding
-        # with the cdrom slot.
+        # CDROM / disk IDE-slot placement -- two layouts depending on whether
+        # the main disk itself sits on the IDE bus.
+        #
+        #  * Disk NOT on IDE (e.g. NetBSD, which has no VM_DISK and so defaults
+        #    to virtio). Pin the install CDROM to IDE primary master (index=0),
+        #    matching the libvirt-era release XML (`<target dev='hda'
+        #    bus='ide'/>`) so the guest sees it as cd0a -- NetBSD sysinst's
+        #    default mount path. QEMU's `-cdrom` shortcut would instead land it
+        #    at index=2 (cd1a), which NetBSD fails to mount, looping in the
+        #    "Distribution medium" menu. The virtio disk never shares the IDE
+        #    bus, so this cannot disturb the disk's identity.
+        #
+        #  * Disk ON IDE (dragonflybsd / ghostbsd: VM_DISK=ide). The disk MUST
+        #    stay on IDE primary master (index=0) so QEMU hands it the lowest
+        #    auto serial (QM00001) in BOTH the install run (CDROM present) and
+        #    the startVM reboot (CDROM gone). QEMU assigns `QM%05d` serials in
+        #    IDE init order (index 0,1,2,3), independent of disk-vs-cdrom. If
+        #    the CDROM stole index=0 the disk would be QM00003 during install
+        #    but QM00001 on reboot, so DragonFly's recorded root device
+        #    `serno/QM00003` would vanish -> "Root mount failed: 6" hang at
+        #    mountroot>. So here the CDROM goes on secondary master via the
+        #    `-cdrom` shortcut (index=2) and the disk keeps index=0.
+        ide_disk = (dif == "ide")
         if dif == "sata":
             a += ["-drive", "file=%s,format=qcow2,if=none,id=disk0,discard=unmap,detect-zeroes=unmap" % qcow]
             a += ["-device", "ich9-ahci,id=ahci0", "-device", "ide-hd,bus=ahci0.0,drive=disk0"]
-        elif dif == "ide" and media_kind == "cdrom":
-            a += ["-drive", "file=%s,format=qcow2,if=ide,index=2,discard=unmap,detect-zeroes=unmap" % qcow]
         else:
             a += ["-drive", "file=%s,format=qcow2,if=%s,discard=unmap,detect-zeroes=unmap" % (qcow, dif)]
         if media_kind == "cdrom":
-            a += ["-drive", "file=%s,format=raw,if=ide,index=0,media=cdrom" % media_path,
-                  "-boot", "order=dc,menu=off"]
+            if ide_disk:
+                # IDE disk already holds index=0; CDROM goes to secondary
+                # master (index=2) so the disk keeps its stable serial.
+                a += ["-cdrom", media_path, "-boot", "order=dc,menu=off"]
+            else:
+                a += ["-drive", "file=%s,format=raw,if=ide,index=0,media=cdrom" % media_path,
+                      "-boot", "order=dc,menu=off"]
         elif media_kind == "disk":
             a += ["-drive", "file=%s,format=raw,if=ide" % media_path]
         # VGA device, anyvm.py:5441-5444. NetBSD/Haiku -> std,
@@ -1093,9 +1110,21 @@ def setup(install_ocr=None):
                         "tesseract-ocr", "python3-pil",
                         "tesseract-ocr-eng", "tesseract-ocr-script-latn",
                         "python3-opencv", "python3-pip"], env=apt_env)
+            # Use opencv-python-HEADLESS: the full opencv-python wheel needs
+            # libGL.so.1, which headless CI runners (GitHub Actions) lack, so
+            # `import cv2` raises ImportError there and ocr_py silently falls
+            # back to plain tesseract -- which cannot read the dim cyan dialog
+            # fields (e.g. the OmniOS hostname box). The headless wheel has the
+            # identical cv2 API with no GUI/GL dependencies.
             if _sh_quiet("pip3 install -q --break-system-packages "
-                         "pytesseract opencv-python vncdotool") != 0:
-                _sh_quiet("pip3 install -q pytesseract opencv-python vncdotool")
+                         "pytesseract opencv-python-headless vncdotool") != 0:
+                _sh_quiet("pip3 install -q pytesseract opencv-python-headless vncdotool")
+            try:
+                import cv2  # noqa: F401
+                log("setup: cv2 import OK -- cyan-field OCR pass enabled")
+            except Exception as e:
+                log("setup: cv2 import FAILED (%s) -- OCR falls back to plain "
+                    "tesseract, cyan-field recovery DISABLED" % e)
             vp = os.path.join(HOME, ".local", "bin", "vncdotool")
             if os.path.exists(vp):
                 _run_quiet(["sudo", "ln", "-sf", vp, "/usr/local/bin/vncdotool"])
@@ -1136,7 +1165,7 @@ def setup(install_ocr=None):
                     "KVM unavailable, falling back to TCG." % e)
     else:
         _run_quiet(["brew", "install", "tesseract", "qemu"])
-        _sh_quiet("pip3 install -q pytesseract opencv-python vncdotool")
+        _sh_quiet("pip3 install -q pytesseract opencv-python-headless vncdotool")
         log("Reloading sshd services in the Host")
         _sh_quiet('sudo sh -c \'echo "" >>/etc/ssh/sshd_config; '
                   'echo "StrictModes no" >>/etc/ssh/sshd_config\'')
@@ -1340,20 +1369,37 @@ def ocr_py(img):
     # pass above drops. The OmniOS/illumos installer draws input-field values
     # (e.g. the "Enter the system hostname" box's "omnios") in cyan, which sits
     # below the OTSU threshold, so the primary pass sees only the bright banner
-    # and the field can never be matched. The cyan channel min(G,B)-R isolates
-    # that text; on screens with no cyan it yields nothing, so this only ADDS
-    # field values and never perturbs an existing match. cv2.imread gives BGR,
-    # so split() returns (B, G, R) -- use those channels directly.
-    try:
-        b_ch, g_ch, r_ch = cv2.split(im)
-        cyan = cv2.subtract(cv2.min(g_ch, b_ch), r_ch)
-        cyan = cv2.resize(cyan, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-        _, cyan = cv2.threshold(cyan, 25, 255, cv2.THRESH_BINARY)
-        ctext = pytesseract.image_to_string(cyan).strip()
-        if ctext:
-            text = text + "\n" + ctext
-    except Exception:
-        pass
+    # and the field can never be matched. Only attempt it when the primary pass
+    # is "banner-only" (the dialog OCRs to just the banner, ~18 chars); richer
+    # screens never need it, so this skips the cost and avoids any cyan noise.
+    # cv2.imread gives BGR, so split() returns (B, G, R); cyan = min(G,B)-R
+    # isolates the field text and is ~0 on yellow borders / the white banner.
+    # Crop to the cyan content's bounding box, then OCR with --psm 7 (treat as
+    # a single text line). Upscaling the whole frame to 3200x2400 and OCRing it
+    # with tesseract's default PSM 3 (auto page layout) finds the lone cyan word
+    # on tesseract 5.x but FAILS on the older tesseract the CI runner ships --
+    # so the field read empty in CI even though the captured pixels were
+    # identical to local. Cropping to the cyan bbox yields a small, dense,
+    # single-line image and --psm 7 skips the version-dependent layout analysis,
+    # so it reads the same on every tesseract version.
+    if len(text.strip()) < 40:
+        try:
+            b_ch, g_ch, r_ch = cv2.split(im)
+            cyan = cv2.subtract(cv2.min(g_ch, b_ch), r_ch)
+            _, mask = cv2.threshold(cyan, 16, 255, cv2.THRESH_BINARY)
+            ys, xs = numpy.where(mask > 0)
+            if len(xs) >= 5:
+                pad = 8
+                y0 = max(0, int(ys.min()) - pad); y1 = int(ys.max()) + pad
+                x0 = max(0, int(xs.min()) - pad); x1 = int(xs.max()) + pad
+                crop = cyan[y0:y1, x0:x1]
+                crop = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+                _, crop = cv2.threshold(crop, 16, 255, cv2.THRESH_BINARY)
+                ctext = pytesseract.image_to_string(crop, config="--psm 7").strip()
+                if ctext:
+                    text = text + "\n" + ctext
+        except Exception:
+            pass
     return text
 
 
