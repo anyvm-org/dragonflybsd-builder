@@ -506,13 +506,22 @@ def obsd_acpi_off():
 
 
 def make_blank(path, mb):
+    # Write real zero bytes (NOT f.truncate(), which makes a sparse file).
+    # Mirrors anyvm.py:create_sized_file. The aarch64 virt machine treats the
+    # pflash images as a fixed 64MB raw flash device; a sparse-holed image can
+    # make EDK2 misread the firmware and the guest resets in a boot loop (seen
+    # on OpenBSD arm64). Fully-allocated zeros match anyvm.py's validated path.
+    chunk = b"\0" * (1024 * 1024)
     with open(path, "wb") as f:
-        f.truncate(mb * 1024 * 1024)
+        for _ in range(mb):
+            f.write(chunk)
 
 
 def copy_into(src, dst):
+    # Overwrite the start of dst without truncating it (like dd conv=notrunc).
+    # Mirrors anyvm.py:copy_content_to_file.
     with open(src, "rb") as s: data = s.read()
-    with open(dst, "r+b") as d: d.seek(0); d.write(data)
+    with open(dst, "r+b") as d: d.write(data)
 
 
 def _aarch64_efi_search_dirs(qemu_bin=None):
@@ -530,7 +539,7 @@ def _aarch64_efi_search_dirs(qemu_bin=None):
 
 
 # Relative paths under each search dir where aarch64 EDK2 CODE firmware lives.
-# Mirrors anyvm.py:5232-5238. Order = preference (Debian/Ubuntu first).
+# Mirrors anyvm.py:5232-5238 verbatim (anyvm.py's arm64 path is validated).
 _AARCH64_EFI_CODE_RELNAMES = [
     os.path.join("edk2", "aarch64", "QEMU_EFI.fd"),
     os.path.join("qemu-efi-aarch64", "QEMU_EFI.fd"),
@@ -1251,18 +1260,24 @@ def _serial_tail_line(window=4096):
     return size, last
 
 
-def _wait_vm_down(what="VM", poll=20):
+def _wait_vm_down(what="VM", poll=20, max_seconds=1800):
     """Block until isRunning() reports not-running. Every poll prints a one-
     line status: elapsed time, size of <osname>.serial.log, and the last non-
     empty line of the guest console -- so it's obvious whether the install is
-    making progress or stuck."""
+    making progress or stuck.
+
+    After max_seconds (default 1800 = 30 min) without the VM going down, we
+    force-kill the QEMU process via destroyVM() and return. This caps the
+    blast radius when a guest ignores the ACPI shutdown request -- before
+    the cap, FreeBSD 13.5 aarch64 sat at its login: prompt and burned the
+    entire 6h CI budget in this loop."""
     osname = env("VM_OS_NAME") or "vm"
     monport = read_state(osname, "monport")
     serport = read_state(osname, "serport")
     vncport = read_state(osname, "vncport") or "5900"
-    log("waiting for %s to power off (poll %ds; vnc 127.0.0.1::%s, "
+    log("waiting for %s to power off (poll %ds, max %ds; vnc 127.0.0.1::%s, "
         "monitor 127.0.0.1:%s, serial 127.0.0.1:%s -> %s.serial.log)"
-        % (what, poll, vncport, monport, serport, osname))
+        % (what, poll, max_seconds, vncport, monport, serport, osname))
     elapsed = 0
     while isRunning() == 0:
         time.sleep(poll)
@@ -1270,6 +1285,11 @@ def _wait_vm_down(what="VM", poll=20):
         size, tail = _serial_tail_line()
         mm, ss = divmod(elapsed, 60)
         log("[%dm%02ds] %s, serial=%dB | %s" % (mm, ss, what, size, tail[:140]))
+        if elapsed >= max_seconds:
+            log("%s did not power off in %d s; force-killing QEMU"
+                % (what, max_seconds))
+            destroyVM()
+            return
     log("%s powered off after %d s" % (what, elapsed))
 
 
@@ -1315,7 +1335,26 @@ def ocr_py(img):
     kernel = numpy.ones((2, 1), numpy.uint8)
     im2 = cv2.erode(gray, kernel, iterations=1)
     im2 = cv2.dilate(im2, kernel, iterations=1)
-    return pytesseract.image_to_string(im2)
+    text = pytesseract.image_to_string(im2)
+    # Second pass: recover dim CYAN dialog-field text that the grayscale OTSU
+    # pass above drops. The OmniOS/illumos installer draws input-field values
+    # (e.g. the "Enter the system hostname" box's "omnios") in cyan, which sits
+    # below the OTSU threshold, so the primary pass sees only the bright banner
+    # and the field can never be matched. The cyan channel min(G,B)-R isolates
+    # that text; on screens with no cyan it yields nothing, so this only ADDS
+    # field values and never perturbs an existing match. cv2.imread gives BGR,
+    # so split() returns (B, G, R) -- use those channels directly.
+    try:
+        b_ch, g_ch, r_ch = cv2.split(im)
+        cyan = cv2.subtract(cv2.min(g_ch, b_ch), r_ch)
+        cyan = cv2.resize(cyan, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, cyan = cv2.threshold(cyan, 25, 255, cv2.THRESH_BINARY)
+        ctext = pytesseract.image_to_string(cyan).strip()
+        if ctext:
+            text = text + "\n" + ctext
+    except Exception:
+        pass
+    return text
 
 
 def ocr(img):
@@ -2435,9 +2474,15 @@ def main(argv):
         # build in the same workspace (run locally, or any CI runner reused
         # by a follow-up matrix job) errors at QEMU launch with
         #   Could not set up host forwarding rule 'tcp:127.0.0.1:N-...'.
+        # Use destroyVM() (SIGTERM -> SIGKILL the QEMU pid), NOT
+        # shutdownVM()+_wait_vm_down: shutdownVM sends HMP system_powerdown
+        # which is an ACPI shutdown request, and some guests ignore it (seen
+        # on FreeBSD 13.5 aarch64 -- the verification VM stayed at the
+        # login: prompt and _wait_vm_down looped for the entire 6h CI
+        # budget). We're done with the qcow2 -- it was already exported --
+        # so a hard kill is safe.
         if isRunning() == 0:
-            shutdownVM()
-            _wait_vm_down(what="verification VM", poll=5)
+            destroyVM()
         closeConsole()
 
     log("Build finished.")
