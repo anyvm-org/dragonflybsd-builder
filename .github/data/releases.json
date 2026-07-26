@@ -1,0 +1,32 @@
+{
+  "os": "dragonflybsd",
+  "releases": [
+    {
+      "tag": "6.4.0",
+      "release": "6.4.0",
+      "arch": "x86_64",
+      "sync": "rsync,scp,nfs",
+      "shutdown": "/sbin/shutdown -p now",
+      "desktop": false,
+      "build": true
+    },
+    {
+      "tag": "6.4.1",
+      "release": "6.4.1",
+      "arch": "x86_64",
+      "sync": "rsync,scp,nfs",
+      "shutdown": "/sbin/shutdown -p now",
+      "desktop": false,
+      "build": true
+    },
+    {
+      "tag": "6.4.2",
+      "release": "6.4.2",
+      "arch": "x86_64",
+      "sync": "rsync,scp,nfs",
+      "shutdown": "/sbin/shutdown -p now",
+      "desktop": false,
+      "build": true
+    }
+  ]
+}
