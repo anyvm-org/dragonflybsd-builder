@@ -14,9 +14,9 @@ All the supported releases are here:
 
 | Release | x86_64(amd64) |
 |---------|---------|
-| 6.4.2 | ✅ (rsync,scp,nfs) |
-| 6.4.1 | ✅ (rsync,scp,nfs) |
-| 6.4.0 | ✅ (rsync,scp,nfs) |
+| 6.4.2 | ✅ (rsync,scp,nfs,tar) |
+| 6.4.1 | ✅ (rsync,scp,nfs,tar) |
+| 6.4.0 | ✅ (rsync,scp,nfs,tar) |
 
 <!-- arch-label: x86_64 = x86_64(amd64) -->
 Note: sshfs is not offered on DragonFlyBSD -- the sshfs (FUSE) mount is
