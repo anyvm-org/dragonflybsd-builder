@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Print the newest DragonFly BSD x86_64 _REL release version, e.g. "6.4.2".
+# Print the newest DragonFly BSD x86_64 _REL release of EACH branch, one
+# per line, e.g. "6.2.2", "6.4.2".
 # Empty output means "nothing detected" and is not an error; a non-zero exit
 # means detection itself is broken (network error, HTTP error, or a page
 # that no longer matches the expected shape) and must be reported by the
@@ -26,6 +27,18 @@
 # candidate build never matches. At fetch time the newest real release was
 # 6.4.2 (2025-07-24), matching the current conf/dragonflybsd-6.4.2.conf.
 #
+# ONE LINE PER BRANCH, not just the newest overall. The listing keeps
+# every past release, so the day a new branch opens (6.4.x -> 6.6.x) a
+# later 6.4.3 would sit invisible behind 6.6.0 if only the numerically
+# newest file were reported.
+#
+# gendata.newest_per_branch() does the grouping. It is the same function
+# watch.py's decide() uses to pick each reported version's template
+# conf, so the hook and the engine cannot disagree about what a branch
+# is. Reporting a branch this builder does not track costs nothing:
+# watch.py refuses any version whose branch has no conf switched on in
+# conf/all.release.conf, and says so in the run log.
+#
 # stdlib only (urllib.request, re, sys, os) -- no external dependencies.
 
 import os
@@ -42,22 +55,23 @@ USER_AGENT = "anyvm-org-upstream-watcher/1.0"
 PATTERN = re.compile(r'href="dfly-x86_64-(\d+\.\d+\.\d+)_REL\.iso"')
 
 
-def resolve_natural_key():
-    """Return the engine's own natural_key, or fail loudly.
+def resolve_gendata():
+    """Return base-builder's gendata module, or fail loudly.
 
     watch.yml clones base-builder INTO the builder repo root, so at
     detection time it sits at "base-builder/" (relative to this hook's
     cwd, the builder repo root). A local checkout instead has it as a
     sibling, "../base-builder". Try both, in that order.
 
-    There is deliberately NO local fallback copy. Ordering must be the
-    single rule the engine uses -- a per-hook duplicate would have to be
-    kept in sync by hand across every builder and would drift silently,
-    and a hook that ranks versions differently from watch.py is worse
-    than one that refuses to run. Both real contexts (CI and a local
-    sibling checkout) always provide base-builder, so an ImportError here
-    means the environment is wrong: report it as broken detection rather
-    than guessing an order.
+    There is deliberately NO local fallback copy of natural_key or
+    branch_key. Ordering and branch grouping must be the single rule the
+    engine uses -- a per-hook duplicate would have to be kept in sync by
+    hand across every builder and would drift silently, and a hook that
+    ranks or groups versions differently from watch.py is worse than one
+    that refuses to run. Both real contexts (CI and a local sibling
+    checkout) always provide base-builder, so an ImportError here means
+    the environment is wrong: report it as broken detection rather than
+    guessing an order.
     """
     for candidate in ("base-builder", os.path.join("..", "base-builder")):
         if not os.path.isdir(candidate):
@@ -67,7 +81,7 @@ def resolve_natural_key():
             sys.path.insert(0, path)
         try:
             import gendata
-            return gendata.natural_key
+            return gendata
         except ImportError:
             continue
     raise ImportError(
@@ -84,7 +98,7 @@ def fetch(url):
 
 def main():
     try:
-        key = resolve_natural_key()
+        gendata = resolve_gendata()
     except ImportError as e:
         sys.stderr.write("upstream_check: %s\n" % e)
         return 1
@@ -99,8 +113,8 @@ def main():
         sys.stderr.write("upstream_check: no dfly-x86_64-*_REL.iso file "
                          "found in %s; page shape may have changed\n" % URL)
         return 1
-    newest = sorted(set(versions), key=key)[-1]
-    print(newest)
+    for version in gendata.newest_per_branch(set(versions)):
+        print(version)
     return 0
 
 
